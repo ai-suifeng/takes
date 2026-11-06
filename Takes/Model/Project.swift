@@ -91,7 +91,10 @@ struct ProjectBundle: Hashable {
     var ocrURL: URL { url.appendingPathComponent("ocr.json") }
     var segmentsDir: URL { url.appendingPathComponent("segments", isDirectory: true) }
 
+    var voiceoverDir: URL { url.appendingPathComponent("voiceover", isDirectory: true) }
+
     func segmentURL(_ file: String) -> URL { segmentsDir.appendingPathComponent(file) }
+    func voiceoverURL(_ file: String) -> URL { voiceoverDir.appendingPathComponent(file) }
 
     static func create(in root: URL, name: String) throws -> ProjectBundle {
         let fm = FileManager.default

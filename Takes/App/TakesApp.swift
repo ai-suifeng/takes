@@ -19,9 +19,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             SelfTest.run(output: URL(fileURLWithPath: CommandLine.arguments[i + 1]))
             return
         }
+        if let i = CommandLine.arguments.firstIndex(of: "--voiceover-test"), i + 1 < CommandLine.arguments.count {
+            VoiceoverSelfTest.run(output: URL(fileURLWithPath: CommandLine.arguments[i + 1]), realMic: CommandLine.arguments.contains("--mic"))
+            return
+        }
         if let i = CommandLine.arguments.firstIndex(of: "--export"), i + 2 < CommandLine.arguments.count {
             let a = CommandLine.arguments
-            SelfTest.exportProject(bundle: URL(fileURLWithPath: a[i + 1]), to: URL(fileURLWithPath: a[i + 2]))
+            let fps = (i + 3 < a.count ? Int(a[i + 3]) : nil) ?? 30
+            SelfTest.exportProject(bundle: URL(fileURLWithPath: a[i + 1]), to: URL(fileURLWithPath: a[i + 2]), fps: fps)
             return
         }
         if let i = CommandLine.arguments.firstIndex(of: "--render"), i + 3 < CommandLine.arguments.count {
@@ -56,6 +61,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let i = CommandLine.arguments.firstIndex(of: "--open"), i + 1 < CommandLine.arguments.count {
             model.openEditor(ProjectBundle(url: URL(fileURLWithPath: CommandLine.arguments[i + 1])))
+            if ["--tab", "--seek", "--select"].contains(where: CommandLine.arguments.contains) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 3) { model.debugConfigureFrontEditor(arguments: CommandLine.arguments) }
+            }
             if CommandLine.arguments.contains("--play") {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 3) { model.debugPlayFrontEditor() }
             }

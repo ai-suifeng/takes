@@ -88,6 +88,8 @@ struct CompositionBuilder {
     let meta: ProjectMeta
     let assets: [Int: AVURLAsset]
     let cameraAssets: [Int: AVURLAsset]
+    /// Keyed by file name. Like the others these must outlive the composition: it fails once they are released.
+    let voiceoverAssets: [String: AVURLAsset]
 
     func build(timeline: Timeline, box: RenderStateBox, renderSize: CGSize, fps: Int, edit: EditDocument) async throws -> Result {
         let comp = AVMutableComposition()
@@ -101,12 +103,10 @@ struct CompositionBuilder {
 
         for entry in timeline.entries {
             guard let asset = assets[entry.segment] else { continue }
-            let start = CMTime(seconds: entry.sourceStart - entry.takeStart, preferredTimescale: 600)
-            let at = CMTime(seconds: entry.compStart, preferredTimescale: 600)
-            let range = CMTimeRange(start: start, duration: CMTime(seconds: entry.duration, preferredTimescale: 600))
+            let (at, range) = Self.placement(of: entry)
             if let track = try await asset.loadTracks(withMediaType: .video).first {
                 let trackRange = try await track.load(.timeRange)
-                try video.insertTimeRange(range.intersection(trackRange), of: track, at: at)
+                try video.insertTimeRange(Self.fitted(range, in: trackRange), of: track, at: at)
             }
             let audio = try await asset.loadTracks(withMediaType: .audio)
             var audioIndex = 0
@@ -126,6 +126,8 @@ struct CompositionBuilder {
             }
         }
 
+        let voiceover = try await addVoiceover(to: comp, timeline: timeline, edit: edit)
+
         let vc = AVMutableVideoComposition()
         vc.customVideoCompositorClass = TakesCompositor.self
         vc.frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
@@ -133,7 +135,9 @@ struct CompositionBuilder {
         vc.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
         vc.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
         vc.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
-        let duration = CMTime(seconds: max(timeline.duration, 0.1), preferredTimescale: 600)
+        // Cover exactly the video track: a frame requested past its end has no source and fails the whole export.
+        let videoEnd = video.timeRange.end
+        let duration = videoEnd > .zero ? videoEnd : CMTime(seconds: 0.1, preferredTimescale: 600)
         vc.instructions = [TakesInstruction(timeRange: CMTimeRange(start: .zero, duration: duration),
                                             screenTrackID: video.trackID, cameraTrackID: camera?.trackID, box: box)]
 
@@ -153,7 +157,59 @@ struct CompositionBuilder {
             p.audioTapProcessor = AudioLeveling.makeTap(gain: auto * Float(edit.micVolume), gateLevel: gate)
             params.append(p)
         }
+        if let voiceover {
+            let p = AVMutableAudioMixInputParameters(track: voiceover)
+            let auto = edit.normalizeAudio ? AudioLeveling.dbToGain(edit.voiceoverAutoGain ?? 0) : 1
+            p.audioTapProcessor = AudioLeveling.makeTap(gain: auto * Float(edit.voiceoverVolume),
+                                                        gateLevel: AudioLeveling.voiceoverGateLevel(for: edit))
+            params.append(p)
+        }
         mix.inputParameters = params
         return Result(composition: comp, videoComposition: vc, audioMix: mix)
+    }
+
+    /// Lays the narration on its own track. Uses the clips' tick grid, so it never outlasts the video.
+    private func addVoiceover(to comp: AVMutableComposition, timeline: Timeline, edit: EditDocument) async throws -> AVMutableCompositionTrack? {
+        let placements = VoiceoverLayout.placements(edit.voiceovers, entries: timeline.entries)
+        guard !placements.isEmpty,
+              let track = comp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
+        func ticks(_ seconds: Double) -> CMTimeValue { CMTimeValue((seconds * 600).rounded()) }
+        var sources: [String: (track: AVAssetTrack, range: CMTimeRange)] = [:]
+        for p in placements {
+            if sources[p.file] == nil {
+                guard let asset = voiceoverAssets[p.file],
+                      let source = try? await asset.loadTracks(withMediaType: .audio).first,
+                      let range = try? await source.load(.timeRange) else { continue }
+                sources[p.file] = (source, range)
+            }
+            guard let source = sources[p.file] else { continue }
+            let at = ticks(p.at)
+            let range = CMTimeRange(start: CMTime(value: ticks(p.fileStart), timescale: 600),
+                                    duration: CMTime(value: ticks(p.at + p.duration) - at, timescale: 600))
+                .intersection(source.range)
+            guard !range.isEmpty else { continue }
+            try track.insertTimeRange(range, of: source.track, at: CMTime(value: at, timescale: 600))
+        }
+        return track
+    }
+
+    /// Where a clip lands in the composition and which part of its take it plays.
+    ///
+    /// Both clip edges are snapped to one tick grid, so a clip ends on exactly the tick where the next begins.
+    /// Rounding start and duration separately can leave a 1/600 s hole between clips; a frame that falls in
+    /// the hole has no source, which stalls playback and fails the export.
+    static func placement(of entry: Timeline.Entry) -> (at: CMTime, range: CMTimeRange) {
+        func ticks(_ seconds: Double) -> CMTimeValue { CMTimeValue((seconds * 600).rounded()) }
+        let at = ticks(entry.compStart)
+        let start = CMTime(value: ticks(entry.sourceStart - entry.takeStart), timescale: 600)
+        let duration = CMTime(value: ticks(entry.compEnd) - at, timescale: 600)
+        return (CMTime(value: at, timescale: 600), CMTimeRange(start: start, duration: duration))
+    }
+
+    /// Slides a range that rounding pushed past the end of the track back inside it, keeping its length.
+    static func fitted(_ range: CMTimeRange, in track: CMTimeRange) -> CMTimeRange {
+        guard range.end > track.end else { return range }
+        let start = CMTimeMaximum(track.start, track.end - range.duration)
+        return CMTimeRange(start: start, duration: range.duration).intersection(track)
     }
 }

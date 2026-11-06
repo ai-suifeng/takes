@@ -9,7 +9,7 @@ import SwiftUI
 final class Updater {
     static let shared = Updater()
 
-    static let repo = "ai-suifeng/screen-free"
+    static let repo = "ai-suifeng/takes"
     static var releasesPage: URL { URL(string: "https://github.com/\(repo)/releases")! }
 
     struct Release: Equatable {

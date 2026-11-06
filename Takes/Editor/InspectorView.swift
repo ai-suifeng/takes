@@ -333,8 +333,10 @@ private struct MediaInspector: View {
 
     var body: some View {
         InspectorSection(title: "声音") {
-            if model.meta.hasMic {
+            if model.meta.hasMic || hasVoiceover {
                 ToggleRow(title: "声音增强", symbol: "waveform.badge.plus", isOn: $model.edit.normalizeAudio)
+            }
+            if model.meta.hasMic {
                 Group {
                     if model.isMeasuringLoudness {
                         Text("正在分析讲解音量…")
@@ -351,8 +353,12 @@ private struct MediaInspector: View {
             if model.meta.hasSystemAudio {
                 LabeledSlider(title: "系统声音", value: $model.edit.systemVolume, range: 0...2)
             }
-            if !model.meta.hasMic && !model.meta.hasSystemAudio {
-                Text("这次录制没有声音。").font(.system(size: 12)).foregroundStyle(.secondary)
+            if hasVoiceover {
+                LabeledSlider(title: "配音", value: $model.edit.voiceoverVolume, range: 0...2)
+            }
+            if !model.meta.hasMic && !model.meta.hasSystemAudio && !hasVoiceover {
+                Text("这次录制没有声音。可以点时间线上的「配音」，边看边录一段。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
             }
         }
         InspectorSection(title: "摄像头") {
@@ -379,6 +385,8 @@ private struct MediaInspector: View {
             }
         }
     }
+
+    private var hasVoiceover: Bool { !model.edit.voiceovers.isEmpty }
 
     private func cornerButton(_ c: CameraSettings.Corner) -> some View {
         let selected = model.edit.camera.corner == c

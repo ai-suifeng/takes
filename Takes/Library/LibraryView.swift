@@ -153,7 +153,7 @@ struct LibraryView: View {
         return order.map { ($0, dict[$0]!) }
     }
 
-    private let columns = [GridItem(.adaptive(minimum: 250, maximum: 340), spacing: 22)]
+    private let columns = [GridItem(.adaptive(minimum: 210, maximum: 270), spacing: 24, alignment: .top)]
 
     private var detail: some View {
         ScrollView {
@@ -295,7 +295,10 @@ private struct ProjectCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            ZStack {
+            // The frame sets the size; the thumbnail fills it inside an overlay so a wide image cannot widen the card.
+            Color.clear
+            .aspectRatio(16 / 10, contentMode: .fit)
+            .overlay {
                 Rectangle().fill(.quaternary)
                 if let image = ThumbnailCache.shared.image(for: item.bundle) {
                     Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
@@ -312,7 +315,6 @@ private struct ProjectCard: View {
                         .transition(.scale(scale: 0.8).combined(with: .opacity))
                 }
             }
-            .aspectRatio(16 / 10, contentMode: .fit)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(alignment: .bottomTrailing) {
                 Badge(text: formatDuration(item.meta.duration)).padding(8)
@@ -362,6 +364,7 @@ private struct ProjectCard: View {
                 HStack(spacing: 5) {
                     Image(systemName: item.meta.kind.symbol)
                     Text(item.meta.createdAt, format: .dateTime.month().day().hour().minute())
+                        .lineLimit(1).fixedSize()
                     if !item.meta.apps.isEmpty {
                         Text("·")
                         Text(item.meta.apps.prefix(3).joined(separator: "、")).lineLimit(1)

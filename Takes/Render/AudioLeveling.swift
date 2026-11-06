@@ -74,8 +74,16 @@ enum AudioLeveling {
     /// The floor is a 50 ms RMS level, so the gate compares RMS too: noise peaks sit ~10 dB above
     /// its RMS and would otherwise keep the gate open.
     static func gateLevel(for edit: EditDocument) -> Float {
-        guard edit.normalizeAudio, (edit.micAutoGain ?? 0) > 6, let floor = edit.micNoiseFloor else { return 0 }
-        return Float(pow(10, (floor + 12) / 20))
+        gateLevel(normalize: edit.normalizeAudio, gain: edit.micAutoGain, noiseFloor: edit.micNoiseFloor)
+    }
+
+    static func voiceoverGateLevel(for edit: EditDocument) -> Float {
+        gateLevel(normalize: edit.normalizeAudio, gain: edit.voiceoverAutoGain, noiseFloor: edit.voiceoverNoiseFloor)
+    }
+
+    private static func gateLevel(normalize: Bool, gain: Double?, noiseFloor: Double?) -> Float {
+        guard normalize, (gain ?? 0) > 6, let noiseFloor else { return 0 }
+        return Float(pow(10, (noiseFloor + 12) / 20))
     }
 
     /// Gain while the gate is closed (-26 dB).

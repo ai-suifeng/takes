@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 
 VERSION="${1:?用法: release.sh <版本号> [更新说明]}"
 NOTES="${2:-修复和改进。}"
-REPO="ai-suifeng/screen-free"
+REPO="ai-suifeng/takes"
 
 # Version shown in the app and compared by the updater; build number always goes up.
 BUILD=$(( $(sed -n 's/.*CURRENT_PROJECT_VERSION: "\([0-9]*\)".*/\1/p' project.yml) + 1 ))

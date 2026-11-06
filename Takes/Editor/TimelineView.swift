@@ -6,15 +6,34 @@ struct EditorTimeline: View {
     @Bindable var model: EditorModel
     private let labelWidth: CGFloat = 92
     private let rulerHeight: CGFloat = 22
+    private let collapsedHeight: CGFloat = 18
+    /// Expanded optional tracks (配音/缩放/标注/打码), comma separated. Collapsed by default to leave room for the preview.
+    @AppStorage("timelineExpandedTracks") private var expandedRaw = ""
+    @State private var controlsHeight: CGFloat = 50
+
+    enum OptionalTrack: String, CaseIterable { case voiceover, zoom, annotation, blur }
+
+    private func isOpen(_ t: OptionalTrack) -> Bool { expandedRaw.split(separator: ",").contains(Substring(t.rawValue)) }
+
+    private func setOpen(_ t: OptionalTrack, _ open: Bool) {
+        var set = Set(expandedRaw.split(separator: ",").map(String.init))
+        if open { set.insert(t.rawValue) } else { set.remove(t.rawValue) }
+        withAnimation(.snappy(duration: 0.2)) { expandedRaw = set.sorted().joined(separator: ",") }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             controls
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { controlsHeight = $0 }
             Divider().opacity(0.5)
             GeometryReader { geo in
                 let total = max(model.duration, 0.5)
                 let fit = (Double(geo.size.width) - Double(labelWidth) - 24) / total
                 let pps = fit * model.timelineZoom
+                // When the panel is dragged shorter than the tracks, they scroll vertically.
+                // +16 leaves room for the horizontal scroller, which takes height when scroll bars are always shown.
+                let height = max(tracksHeight + 16, geo.size.height)
+                ScrollView(.vertical, showsIndicators: true) {
                 HStack(spacing: 0) {
                     labels
                     ScrollView(.horizontal, showsIndicators: true) {
@@ -35,11 +54,29 @@ struct EditorTimeline: View {
                                         }
                                         .gesture(rangeDrag(model, pps: pps))
                                 }
-                                ZoomTrack(model: model, pps: pps).frame(height: 26)
-                                AnnotationTrack(model: model, pps: pps).frame(height: annotationTrackHeight)
-                                BlurTrack(model: model, pps: pps).frame(height: 26)
+                                if isOpen(.voiceover) {
+                                    VoiceoverTrack(model: model, pps: pps).frame(height: voiceoverHeight)
+                                } else {
+                                    collapsedStrip(.voiceover, pps: pps)
+                                }
+                                if isOpen(.zoom) {
+                                    ZoomTrack(model: model, pps: pps).frame(height: 26)
+                                } else {
+                                    collapsedStrip(.zoom, pps: pps)
+                                }
+                                if isOpen(.annotation) {
+                                    AnnotationTrack(model: model, pps: pps).frame(height: annotationTrackHeight)
+                                } else {
+                                    collapsedStrip(.annotation, pps: pps)
+                                }
+                                if isOpen(.blur) {
+                                    BlurTrack(model: model, pps: pps).frame(height: 26)
+                                } else {
+                                    collapsedStrip(.blur, pps: pps)
+                                }
                             }
                             .padding(.vertical, 6)
+                            .allowsHitTesting(model.voiceoverPhase == .idle)
                             .onContinuousHover(coordinateSpace: .named("timeline")) { phase in
                                 switch phase {
                                 case .active(let p): model.skim(to: p.x / pps)
@@ -48,27 +85,86 @@ struct EditorTimeline: View {
                             }
                             if let r = model.range {
                                 RangeOverlay(model: model, range: r, pps: pps,
-                                             top: 6 + rulerHeight + 6, height: 58 + (hasAudio ? 6 + 34 : 0))
+                                             top: 6 + rulerHeight + 6, height: 58 + (hasAudio ? 6 + 34 : 0) + 6 + voiceoverHeight)
                             }
                             if let t = model.skimTime {
-                                SkimLine(time: t, height: geo.size.height).offset(x: t * pps)
+                                SkimLine(time: t, height: height).offset(x: t * pps)
                             }
-                            Playhead(height: geo.size.height)
+                            Playhead(height: height)
                                 .offset(x: model.currentTime * pps - 6)
                                 .gesture(scrub(pps: pps))
+                                .allowsHitTesting(model.voiceoverPhase == .idle)
                         }
                         .frame(width: total * pps + 12, alignment: .leading)
                         .padding(.trailing, 12)
                         .coordinateSpace(name: "timeline")
                     }
                 }
+                .frame(height: height, alignment: .top)
+                }
             }
         }
         .background(.background.secondary)
+        // Height that shows every track without scrolling; the editor sizes the panel to it until the user drags.
+        .preference(key: TimelineIdealHeightKey.self, value: controlsHeight + 1 + tracksHeight + 16)
+        // Open a collapsed track when something on it is selected, added or being recorded.
+        .onChange(of: model.selection) { _, sel in
+            switch sel {
+            case .voiceover: if !isOpen(.voiceover) { setOpen(.voiceover, true) }
+            case .zoom: if !isOpen(.zoom) { setOpen(.zoom, true) }
+            case .annotation: if !isOpen(.annotation) { setOpen(.annotation, true) }
+            case .blur: if !isOpen(.blur) { setOpen(.blur, true) }
+            default: break
+            }
+        }
+        .onChange(of: model.voiceoverPhase) { _, phase in
+            if phase != .idle, !isOpen(.voiceover) { setOpen(.voiceover, true) }
+        }
+        .onChange(of: model.edit.voiceovers.count) { old, new in if new > old, !isOpen(.voiceover) { setOpen(.voiceover, true) } }
+        .onChange(of: model.edit.zooms.count) { old, new in if new > old, !isOpen(.zoom) { setOpen(.zoom, true) } }
+        .onChange(of: model.edit.annotations.count) { old, new in if new > old, !isOpen(.annotation) { setOpen(.annotation, true) } }
+        .onChange(of: model.edit.blurs.count) { old, new in if new > old, !isOpen(.blur) { setOpen(.blur, true) } }
+    }
+
+    private func spans(_ t: OptionalTrack) -> [(Double, Double)] {
+        let items: [(Double, Double)]
+        switch t {
+        case .voiceover: items = model.edit.voiceovers.map { ($0.start, $0.end) }
+        case .zoom: items = model.edit.zooms.map { ($0.start, $0.end) }
+        case .annotation: items = model.edit.annotations.map { ($0.start, $0.end) }
+        case .blur: items = model.edit.blurs.map { ($0.start, $0.end) }
+        }
+        return items.compactMap { model.timeline.compRange(start: $0.0, end: $0.1) }
+    }
+
+    private func trackColor(_ t: OptionalTrack) -> Color {
+        switch t {
+        case .voiceover: Theme.pauseAmber
+        case .zoom: Theme.violet
+        case .annotation: Theme.coral
+        case .blur: Color(red: 0.25, green: 0.6, blue: 0.75)
+        }
+    }
+
+    /// A collapsed track: thin marks where its items are, so you can see there is something there. Click to open.
+    private func collapsedStrip(_ t: OptionalTrack, pps: Double) -> some View {
+        ZStack(alignment: .leading) {
+            RoundedRectangle(cornerRadius: 4).fill(.primary.opacity(0.03))
+            ForEach(Array(spans(t).enumerated()), id: \.offset) { _, span in
+                Capsule().fill(trackColor(t).opacity(0.8))
+                    .frame(width: max(3, (span.1 - span.0) * pps), height: 6)
+                    .offset(x: span.0 * pps)
+            }
+        }
+        .frame(height: collapsedHeight)
+        .contentShape(Rectangle())
+        .onTapGesture { setOpen(t, true) }
+        .help("点击展开")
     }
 
     private var controls: some View {
         HStack(spacing: 14) {
+            voiceoverButton
             HStack(spacing: 2) {
                 Button { model.step(frames: -1) } label: { Image(systemName: "backward.frame.fill") }
                     .buttonStyle(HUDButtonStyle(size: 28))
@@ -77,6 +173,7 @@ struct EditorTimeline: View {
                 Button { model.step(frames: 1) } label: { Image(systemName: "forward.frame.fill") }
                     .buttonStyle(HUDButtonStyle(size: 28))
             }
+            .disabled(model.voiceoverPhase != .idle)
             HStack(spacing: 4) {
                 Text(formatDuration(model.currentTime, showFraction: true))
                 Text("/").foregroundStyle(.tertiary)
@@ -98,18 +195,17 @@ struct EditorTimeline: View {
             .menuIndicator(.hidden)
             .fixedSize()
             .help("播放速度：快速过一遍找要删的地方")
+            .disabled(model.voiceoverPhase != .idle)
 
             Rectangle().fill(.separator).frame(width: 1, height: 20)
 
             HStack(spacing: 6) {
-                editButton("分割", "scissors", help: "在播放头处分割 (S)", action: model.splitAtPlayhead)
+                editButton("分割", "scissors", help: "在播放头处分割选中的内容；没选中时分割视频 (S)", action: model.splitAtPlayhead)
                 trimButton(left: true)
                 trimButton(left: false)
-                editButton("删除", "trash", help: "删除选中的片段 (⌫)") {
-                    if case .clip(let id) = model.selection { model.deleteClip(id) }
-                }
-                .disabled(!isClipSelected)
-                .opacity(isClipSelected ? 1 : 0.45)
+                editButton("删除", "trash", help: "删除选中的内容 (⌫)") { model.delete(model.selection) }
+                    .disabled(model.selection == .none)
+                    .opacity(model.selection == .none ? 0.45 : 1)
                 editButton("加缩放", "plus.magnifyingglass", help: "在播放头处加一段缩放 (Z)") {
                     model.addZoom(at: model.sourceTime)
                 }
@@ -124,11 +220,15 @@ struct EditorTimeline: View {
                 .menuIndicator(.hidden)
                 .frame(width: 24)
             }
+            .disabled(model.voiceoverPhase != .idle)
 
             Spacer()
 
             if let msg = model.statusMessage {
                 Text(msg).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).layoutPriority(-1)
+            } else if let target = model.cutTargetName {
+                Text("分割和裁剪只作用于选中的\(target)，不动视频").font(.system(size: 11)).foregroundStyle(.secondary)
+                    .lineLimit(1).layoutPriority(-1)
             } else if model.range == nil {
                 Text("在片段或声音上拖动可选中一段，按 ⌫ 删除").font(.system(size: 11)).foregroundStyle(.tertiary)
                     .lineLimit(1).layoutPriority(-1)
@@ -143,6 +243,29 @@ struct EditorTimeline: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
+    }
+
+    /// Starts narrating from the playhead; while it runs this is the way out.
+    private var voiceoverButton: some View {
+        let active = model.voiceoverPhase != .idle
+        let title: String = switch model.voiceoverPhase {
+        case .idle: "配音"
+        case .preparing, .countdown: "取消"
+        case .recording, .finishing: "结束配音"
+        }
+        return Button(action: model.toggleVoiceover) {
+            Label(title, systemImage: active ? "stop.fill" : "mic.fill")
+                .labelStyle(.titleAndIcon)
+                .font(.system(size: 12, weight: .semibold))
+                .fixedSize()
+                .foregroundStyle(active ? Color.white : Theme.recordRed)
+                .padding(.horizontal, 12).padding(.vertical, 6)
+                .background(active ? AnyShapeStyle(Theme.recordRed) : AnyShapeStyle(Theme.recordRed.opacity(0.12)), in: Capsule())
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.voiceoverPhase == .finishing)
+        .help("从播放头开始，边看画面边录音 (R)")
     }
 
     /// 剪映-style "向左裁剪 / 向右裁剪" buttons with their own icon.
@@ -160,7 +283,8 @@ struct EditorTimeline: View {
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        .help(left ? "向左裁剪：删掉播放头左边的部分 (Q)" : "向右裁剪：删掉播放头右边的部分 (W)")
+        .help(left ? "向左裁剪：删掉选中内容在播放头左边的部分；没选中时裁剪视频 (Q)"
+                   : "向右裁剪：删掉选中内容在播放头右边的部分；没选中时裁剪视频 (W)")
     }
 
     private func rateLabel(_ r: Float) -> String {
@@ -168,10 +292,14 @@ struct EditorTimeline: View {
     }
 
     private var hasAudio: Bool { model.meta.hasMic || model.meta.hasSystemAudio }
+    private var voiceoverHeight: CGFloat { isOpen(.voiceover) ? 34 : collapsedHeight }
+    private var zoomHeight: CGFloat { isOpen(.zoom) ? 26 : collapsedHeight }
+    private var blurHeight: CGFloat { isOpen(.blur) ? 26 : collapsedHeight }
 
-    private var isClipSelected: Bool {
-        if case .clip = model.selection { return true }
-        return false
+    /// Full height of the ruler plus every track, matching the stack in `body`.
+    private var tracksHeight: CGFloat {
+        let rows: [CGFloat] = [rulerHeight, 58] + (hasAudio ? [34] : []) + [voiceoverHeight, zoomHeight, annotationTrackHeight, blurHeight]
+        return rows.reduce(0, +) + CGFloat(rows.count - 1) * 6 + 12 + 8
     }
 
     private func editButton(_ title: String, _ symbol: String, help: String, action: @escaping () -> Void) -> some View {
@@ -189,7 +317,8 @@ struct EditorTimeline: View {
     }
 
     private var annotationTrackHeight: CGFloat {
-        CGFloat(min(3, max(1, Lanes.assign(model.edit.annotations.map { ($0.start, $0.end) }).count))) * 22 + 4
+        guard isOpen(.annotation) else { return collapsedHeight }
+        return CGFloat(min(3, max(1, Lanes.assign(model.edit.annotations.map { ($0.start, $0.end) }).count))) * 22 + 4
     }
 
     private var labels: some View {
@@ -197,13 +326,40 @@ struct EditorTimeline: View {
             Color.clear.frame(height: rulerHeight)
             label("片段", "film.stack", height: 58)
             if hasAudio { label("声音", "waveform", height: 34) }
-            label("缩放", "plus.magnifyingglass", height: 26)
-            label("标注", "pencil.and.outline", height: annotationTrackHeight)
-            label("打码", "eye.slash", height: 26)
+            toggleLabel(.voiceover, "配音", "mic", count: model.edit.voiceovers.count, height: voiceoverHeight)
+            toggleLabel(.zoom, "缩放", "plus.magnifyingglass", count: model.edit.zooms.count, height: zoomHeight)
+            toggleLabel(.annotation, "标注", "pencil.and.outline", count: model.edit.annotations.count, height: annotationTrackHeight)
+            toggleLabel(.blur, "打码", "eye.slash", count: model.edit.blurs.count, height: blurHeight)
         }
         .padding(.vertical, 6)
         .frame(width: labelWidth, alignment: .leading)
         .padding(.leading, 14)
+    }
+
+    /// Label of an optional track; click to collapse or expand it. Shows how many items it holds.
+    private func toggleLabel(_ t: OptionalTrack, _ text: String, _ symbol: String, count: Int, height: CGFloat) -> some View {
+        let open = isOpen(t)
+        return Button { setOpen(t, !open) } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 8, weight: .bold))
+                    .rotationEffect(.degrees(open ? 90 : 0))
+                    .frame(width: 9)
+                Image(systemName: symbol).font(.system(size: open ? 11 : 9, weight: .medium))
+                Text(text).font(.system(size: open ? 11 : 10, weight: .medium))
+                if count > 0 {
+                    Text("\(count)").font(.system(size: 9, weight: .semibold)).monospacedDigit()
+                        .padding(.horizontal, 4).padding(.vertical, 0.5)
+                        .background(.primary.opacity(0.08), in: Capsule())
+                }
+            }
+            .foregroundStyle(.secondary)
+            .frame(height: height)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(open ? "收起\(text)轨道" : "展开\(text)轨道")
     }
 
     private func label(_ text: String, _ symbol: String, height: CGFloat) -> some View {
@@ -342,6 +498,9 @@ private struct RangeOverlay: View {
                 .padding(.horizontal, 6)
             action("play.fill", help: "播放这一段") { model.playRange() }
             action("trash.fill", help: "删除这一段 (⌫)") { model.deleteRange() }
+            if model.rangeHasVoiceover {
+                action("mic.slash.fill", help: "只删除这一段的配音，保留画面") { model.deleteVoiceoverInRange() }
+            }
             action("xmark", help: "取消选择 (esc)") { model.range = nil }
         }
         .foregroundStyle(.white)
@@ -571,6 +730,153 @@ private struct AudioTrack: View {
     }
 }
 
+// MARK: - Voiceover
+
+/// Narration in output time. Each block is a kept stretch of a recording, so a cut in the video cuts it too.
+private struct VoiceoverTrack: View {
+    var model: EditorModel
+    let pps: Double
+
+    var body: some View {
+        let placements = VoiceoverLayout.placements(model.edit.voiceovers, entries: model.timeline.entries)
+        ZStack(alignment: .topLeading) {
+            waveform(placements)
+                .contentShape(Rectangle())
+                .onTapGesture(coordinateSpace: .named("timeline")) { p in
+                    model.range = nil
+                    model.selection = .none
+                    model.player.pause()
+                    model.seek(comp: p.x / pps)
+                }
+                .gesture(rangeDrag(model, pps: pps))
+            ForEach(placements, id: \.stableID) { p in
+                VoiceoverBlock(model: model, placement: p, pps: pps)
+            }
+        }
+    }
+
+    private func waveform(_ placements: [VoiceoverPlacement]) -> some View {
+        let waves = model.voiceoverWaveforms
+        let gain = model.voiceoverWaveformGain
+        let live = model.voiceoverLevels
+        let idle = model.voiceoverPhase == .idle
+        return Canvas { ctx, size in
+            ctx.fill(Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 6), with: .color(.primary.opacity(0.04)))
+            let mid = size.height / 2
+            let barStep: CGFloat = 2
+            func bar(_ path: inout Path, x: CGFloat, level: Double) {
+                // Same mapping as the 声音 track.
+                let l = level < 0.004 ? 0 : min(1, pow(level / 0.3, 0.8))
+                let h = max(0.5, l * (mid - 2))
+                path.addRect(CGRect(x: x, y: mid - h, width: max(1, barStep - 0.6), height: h * 2))
+            }
+            var path = Path()
+            for p in placements {
+                guard let wave = waves[p.file] else { continue }
+                let x0 = p.at * pps, x1 = (p.at + p.duration) * pps
+                var x = x0
+                while x < x1 {
+                    let a = p.fileStart + (x - x0) / pps
+                    let b = p.fileStart + (min(x + barStep, x1) - x0) / pps
+                    bar(&path, x: x, level: Double(wave.loudness(from: a, to: b, micGain: gain.gain, systemGain: 0, micGate: gain.gate)))
+                    x += barStep
+                }
+            }
+            ctx.fill(path, with: .color(Theme.pauseAmber))
+            var livePath = Path()
+            for sample in live {
+                // Raw mic level: boost it the way a typical quiet mic will be, so the bars move while speaking.
+                bar(&livePath, x: sample.t * pps, level: Double(sample.level) * 4)
+            }
+            ctx.fill(livePath, with: .color(Theme.recordRed))
+            if placements.isEmpty && idle {
+                ctx.draw(Text("没有声音？把播放头移到要开始的地方，按 R 边看边录").font(.system(size: 10)).foregroundStyle(.tertiary),
+                         at: CGPoint(x: 12, y: mid), anchor: .leading)
+            }
+        }
+    }
+}
+
+private struct VoiceoverBlock: View {
+    var model: EditorModel
+    let placement: VoiceoverPlacement
+    let pps: Double
+    /// Where the dragged edge was, in source time, when the drag began.
+    @State private var dragOrigin: Double?
+
+    var body: some View {
+        let p = placement
+        let selected = model.selection == .voiceover(p.pieceID)
+        let hovered = model.hovered == .voiceover(p.pieceID)
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .fill(Theme.pauseAmber.opacity(selected ? 0.24 : 0.12))
+            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(Theme.pauseAmber, lineWidth: selected ? 1.5 : hovered ? 1 : 0))
+            .overlay(alignment: .leading) { edgeHandle(leading: true) }
+            .overlay(alignment: .trailing) { edgeHandle(leading: false) }
+            .frame(width: max(2, p.duration * pps))
+            .contentShape(Rectangle())
+            .offset(x: p.at * pps)
+            .onHover { model.setHovered(.voiceover(p.pieceID), $0) }
+            .onTapGesture(coordinateSpace: .named("timeline")) { point in
+                model.range = nil
+                model.select(.voiceover(p.pieceID))
+                model.player.pause()
+                model.seek(comp: point.x / pps)
+            }
+            .gesture(rangeDrag(model, pps: pps))
+            .contextMenu { ItemCutMenu(model: model, item: .voiceover(p.pieceID)) }
+    }
+
+    private func edgeHandle(leading: Bool) -> some View {
+        Color.white.opacity(0.001)
+            .frame(width: 7)
+            .contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .named("timeline"))
+                    .onChanged { v in
+                        if dragOrigin == nil {
+                            dragOrigin = leading ? placement.source : placement.source + placement.duration
+                            model.select(.voiceover(placement.pieceID))
+                            model.player.pause()
+                        }
+                        let edge = dragOrigin! + v.translation.width / pps
+                        if leading {
+                            model.trimVoiceover(placement.pieceID, start: edge)
+                        } else {
+                            model.trimVoiceover(placement.pieceID, end: edge)
+                        }
+                        // Show the frame the edge is on.
+                        model.seek(comp: model.timeline.compTime(edge))
+                    }
+                    .onEnded { _ in dragOrigin = nil }
+            )
+    }
+}
+
+/// Right-click actions for an item on a track. They act on that item, selected or not.
+private struct ItemCutMenu: View {
+    var model: EditorModel
+    let item: EditorSelection
+
+    var body: some View {
+        Button("在播放头处分割") { model.select(item); model.splitAtPlayhead() }
+        Button { model.select(item); model.trimAtPlayhead(keepRight: true) } label: {
+            Label("向左裁剪（删掉播放头左边）", systemImage: "arrow.left.to.line")
+        }
+        Button { model.select(item); model.trimAtPlayhead(keepRight: false) } label: {
+            Label("向右裁剪（删掉播放头右边）", systemImage: "arrow.right.to.line")
+        }
+        Button("删除", role: .destructive) {
+            if model.selection == item { model.selection = .none }
+            model.delete(item)
+        }
+    }
+}
+
 // MARK: - Item tracks
 
 /// A draggable, resizable capsule on a track. Works in output time.
@@ -587,6 +893,8 @@ private struct TrackItem: View {
     let item: EditorSelection
     let onSelect: () -> Void
     let onChange: (Double, Double) -> Void
+    /// Dragging the left edge, for items whose content must stay on its frames while their start moves.
+    var onLeadingTrim: ((Double, Double) -> Void)? = nil
     @State private var origin: (start: Double, duration: Double)?
     @State private var hovering = false
 
@@ -613,6 +921,7 @@ private struct TrackItem: View {
             model.setHovered(item, inside)
         }
         .onTapGesture(perform: onSelect)
+        .contextMenu { ItemCutMenu(model: model, item: item) }
         .gesture(
             DragGesture(minimumDistance: 2, coordinateSpace: .named("timeline"))
                 .onChanged { v in
@@ -637,7 +946,7 @@ private struct TrackItem: View {
                         let d = v.translation.width / pps
                         if leading {
                             let s = min(max(0, origin!.start + d), origin!.start + origin!.duration - 0.2)
-                            onChange(s, origin!.duration - (s - origin!.start))
+                            (onLeadingTrim ?? onChange)(s, origin!.duration - (s - origin!.start))
                         } else {
                             onChange(origin!.start, max(0.2, origin!.duration + d))
                         }
@@ -746,6 +1055,11 @@ private struct AnnotationTrack: View {
                                   let (start, duration) = sourceSpan(model, compStart: cs, compDuration: cd)
                                   model.edit.annotations[i].start = start
                                   model.edit.annotations[i].duration = duration
+                              },
+                              onLeadingTrim: { cs, cd in
+                                  guard let i = model.edit.annotations.firstIndex(where: { $0.id == a.id }) else { return }
+                                  let (start, duration) = sourceSpan(model, compStart: cs, compDuration: cd)
+                                  model.edit.annotations[i].trim(start: start, end: start + duration)
                               })
                     .offset(y: CGFloat(min(2, lanes.firstIndex { $0.contains(i) } ?? 0)) * 22 + 2)
                 }
@@ -798,9 +1112,20 @@ private struct BlurTrack: View {
                                   let (start, duration) = sourceSpan(model, compStart: cs, compDuration: cd)
                                   model.edit.blurs[i].start = start
                                   model.edit.blurs[i].duration = duration
+                              },
+                              onLeadingTrim: { cs, cd in
+                                  guard let i = model.edit.blurs.firstIndex(where: { $0.id == b.id }) else { return }
+                                  let (start, duration) = sourceSpan(model, compStart: cs, compDuration: cd)
+                                  model.edit.blurs[i].trim(start: start, end: start + duration)
                               })
                 }
             }
         }
     }
+}
+
+/// The timeline's natural height, read by the editor to size the panel.
+struct TimelineIdealHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }

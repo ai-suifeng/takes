@@ -14,6 +14,41 @@ struct Clip: Codable, Hashable, Identifiable {
     var duration: Double { end - start }
 }
 
+/// Something on a track that spans a stretch of source time and can be cut at the playhead.
+protocol TimelineItem {
+    var id: UUID { get set }
+    var start: Double { get }
+    var end: Double { get }
+    /// Narrows or widens the item. What it shows or plays stays on the same frames.
+    mutating func trim(start: Double, end: Double)
+}
+
+/// A stretch of narration recorded over the video. It is anchored to source time, like zooms and blurs,
+/// so it stays on its frames through any later cut.
+struct VoiceoverPiece: Codable, Hashable, Identifiable {
+    var id = UUID()
+    /// File name inside the project's voiceover folder.
+    var file: String
+    /// Where this stretch begins in that file, in seconds.
+    var fileStart: Double
+    /// Source time the first sample belongs to.
+    var start: Double
+    var duration: Double
+    /// Source-time span this stretch of recording can be widened to; nil means no wider than it is now.
+    var sourceMin: Double?
+    var sourceMax: Double?
+
+    var end: Double { start + duration }
+}
+
+extension VoiceoverPiece: TimelineItem {
+    mutating func trim(start newStart: Double, end newEnd: Double) {
+        fileStart += newStart - start
+        start = newStart
+        duration = newEnd - newStart
+    }
+}
+
 /// Per-take trims from the first editor version; read only to migrate to clips.
 struct SegmentEdit: Codable, Hashable {
     var index: Int
@@ -36,6 +71,14 @@ struct ZoomRegion: Codable, Hashable, Identifiable {
     var isAuto = true
 
     var end: Double { start + duration }
+}
+
+extension ZoomRegion: TimelineItem {
+    mutating func trim(start newStart: Double, end newEnd: Double) {
+        start = newStart
+        duration = newEnd - newStart
+        isAuto = false
+    }
 }
 
 struct StrokePoint: Codable, Hashable {
@@ -96,6 +139,16 @@ struct Annotation: Codable, Hashable, Identifiable {
     var end: Double { start + duration }
 }
 
+extension Annotation: TimelineItem {
+    /// Points may end up before the new start: those are simply already drawn.
+    mutating func trim(start newStart: Double, end newEnd: Double) {
+        let shift = start - newStart
+        for i in points.indices { points[i].t += shift }
+        start = newStart
+        duration = newEnd - newStart
+    }
+}
+
 struct BlurKeyframe: Codable, Hashable {
     /// Seconds since the region's start.
     var t: Double
@@ -136,6 +189,17 @@ struct BlurRegion: Codable, Hashable, Identifiable {
             return NormRect.lerp(a.rect, b.rect, f)
         }
         return keyframes.last!.rect
+    }
+}
+
+extension BlurRegion: TimelineItem {
+    /// Keyframes stay on their frames, so a tracked mask keeps covering what it tracked. Ones outside the
+    /// new span are kept: they let `rect(at:)` interpolate at the edges and allow widening it again.
+    mutating func trim(start newStart: Double, end newEnd: Double) {
+        let shift = start - newStart
+        for i in keyframes.indices { keyframes[i].t += shift }
+        start = newStart
+        duration = newEnd - newStart
     }
 }
 
@@ -246,6 +310,11 @@ struct EditDocument: Codable, Hashable {
     var micAutoGain: Double?
     /// Measured background noise of the mic in dBFS, for the noise gate.
     var micNoiseFloor: Double?
+    var voiceovers: [VoiceoverPiece] = []
+    var voiceoverVolume: Double = 1
+    /// Measured boost and background noise of the voiceover, like the mic's.
+    var voiceoverAutoGain: Double?
+    var voiceoverNoiseFloor: Double?
 
     init() {}
 
@@ -269,5 +338,9 @@ struct EditDocument: Codable, Hashable {
         normalizeAudio = try c.decodeIfPresent(Bool.self, forKey: .normalizeAudio) ?? d.normalizeAudio
         micAutoGain = try c.decodeIfPresent(Double.self, forKey: .micAutoGain)
         micNoiseFloor = try c.decodeIfPresent(Double.self, forKey: .micNoiseFloor)
+        voiceovers = try c.decodeIfPresent([VoiceoverPiece].self, forKey: .voiceovers) ?? d.voiceovers
+        voiceoverVolume = try c.decodeIfPresent(Double.self, forKey: .voiceoverVolume) ?? d.voiceoverVolume
+        voiceoverAutoGain = try c.decodeIfPresent(Double.self, forKey: .voiceoverAutoGain)
+        voiceoverNoiseFloor = try c.decodeIfPresent(Double.self, forKey: .voiceoverNoiseFloor)
     }
 }

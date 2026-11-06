@@ -320,6 +320,7 @@ final class AppModel {
         }
         NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
             if let keys { NSEvent.removeMonitor(keys) }
+            doc.finishVoiceoverOnClose()
             doc.saveNow()
             doc.player.pause()
             self?.editors[bundle.url] = nil
@@ -331,6 +332,26 @@ final class AppModel {
     /// Debug: start playback in the open editor.
     func debugPlayFrontEditor() {
         editorModels.values.first?.togglePlay()
+    }
+
+    /// Debug (promo screenshots): put the open editor in a given state.
+    /// `--tab <InspectorTab>`, `--seek <output seconds>`, `--select zoom|blur|voiceover|clip[:index]`.
+    func debugConfigureFrontEditor(arguments a: [String]) {
+        guard let model = editorModels.values.first else { return }
+        func value(_ flag: String) -> String? { a.firstIndex(of: flag).flatMap { $0 + 1 < a.count ? a[$0 + 1] : nil } }
+        if let t = value("--tab").flatMap(InspectorTab.init(rawValue:)) { model.inspectorTab = t }
+        if let s = value("--seek").flatMap(Double.init) { model.seek(comp: s) }
+        if let sel = value("--select") {
+            let parts = sel.split(separator: ":")
+            let i = parts.count > 1 ? Int(parts[1]) ?? 0 : 0
+            switch parts.first {
+            case "zoom": if model.edit.zooms.indices.contains(i) { model.selection = .zoom(model.edit.zooms[i].id) }
+            case "blur": if model.edit.blurs.indices.contains(i) { model.selection = .blur(model.edit.blurs[i].id) }
+            case "voiceover": if model.edit.voiceovers.indices.contains(i) { model.selection = .voiceover(model.edit.voiceovers[i].id) }
+            case "clip": if model.edit.clips.indices.contains(i) { model.selection = .clip(model.edit.clips[i].id) }
+            default: break
+            }
+        }
     }
 
     func showOnboarding() {
@@ -390,6 +411,11 @@ enum EditorKeys {
         let flags = event.modifierFlags.intersection([.command, .option, .control])
         guard flags.isEmpty else { return false }
         let shift = event.modifierFlags.contains(.shift)
+        // While narrating only the keys that end it work, so nothing shifts the timeline underneath.
+        if model.voiceoverPhase != .idle {
+            if event.keyCode == 49 || event.keyCode == 53 || event.charactersIgnoringModifiers == "r" { model.toggleVoiceover() }
+            return true
+        }
         switch event.keyCode {
         case 49: model.togglePlay()
         case 123: model.step(frames: shift ? -60 : -1)
@@ -401,6 +427,7 @@ enum EditorKeys {
             model.range = nil
         default:
             switch event.charactersIgnoringModifiers {
+            case "r": model.toggleVoiceover()
             case "z": model.addZoom(at: model.sourceTime)
             case "s": model.splitAtPlayhead()
             case "i": model.markIn()

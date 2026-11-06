@@ -8,7 +8,11 @@ enum EditorSelection: Hashable {
     case annotation(UUID)
     case blur(UUID)
     case clip(UUID)
+    case voiceover(UUID)
 }
+
+/// A cut at the playhead: split in two, or drop one side.
+enum PlayheadCut { case split, keepRight, keepLeft }
 
 enum CanvasTool: String, CaseIterable {
     case select, box, spotlight, magnify, arrow, rect, text, blur
@@ -111,6 +115,7 @@ final class EditorModel {
     @ObservationIgnored let box: RenderStateBox
     @ObservationIgnored private(set) var assets: [Int: AVURLAsset] = [:]
     @ObservationIgnored private(set) var cameraAssets: [Int: AVURLAsset] = [:]
+    @ObservationIgnored private var voiceoverAssetCache: [String: AVURLAsset] = [:]
     @ObservationIgnored private var durations: [Int: Double] = [:]
     @ObservationIgnored private var rawMoves: [(t: Double, x: Double, y: Double)] = []
     @ObservationIgnored private(set) var clickTimes: [(t: Double, p: NormPoint)] = []
@@ -129,6 +134,15 @@ final class EditorModel {
     @ObservationIgnored private var applyingUndo = false
     private(set) var filmstrips: [Int: [CGImage]] = [:]
     private(set) var waveforms: [Int: Waveform] = [:]
+    /// Waveform of each voiceover file, on the file's own timeline.
+    private(set) var voiceoverWaveforms: [String: Waveform] = [:]
+    private(set) var voiceoverPhase: VoiceoverPhase = .idle
+    /// Output time where the running recording began, and its levels so far.
+    private(set) var voiceoverStart: Double = 0
+    private(set) var voiceoverLevels: [(t: Double, level: Float)] = []
+    @ObservationIgnored private var voiceoverRecorder: VoiceoverRecorder?
+    @ObservationIgnored private var rateBeforeVoiceover: Float = 1
+    @ObservationIgnored private var rebuildAfterVoiceover = false
 
     static let previewLongSide = 1920.0
 
@@ -155,6 +169,7 @@ final class EditorModel {
             // While skimming the player shows the hovered frame, not the playhead.
             if self.skimTime != nil, self.player.rate == 0 { return }
             self.currentTime = t.seconds
+            if self.voiceoverPhase == .recording, t.seconds >= self.duration - 0.05 { self.toggleVoiceover() }
         }
         Task { @MainActor in await self.load() }
     }
@@ -212,6 +227,7 @@ final class EditorModel {
         Task { await self.loadFilmstrips() }
         if meta.hasMic || meta.hasSystemAudio { Task { await self.loadWaveforms() } }
         if meta.hasMic, edit.micAutoGain == nil { Task { await self.measureLoudness() } }
+        Task { await self.loadVoiceoverWaveforms() }
     }
 
     private func loadEvents() {
@@ -259,6 +275,30 @@ final class EditorModel {
             }.value
             waveforms[seg.index] = wave
         }
+    }
+
+    /// Every voiceover file in use. Kept for the model's lifetime, so undo and compositions can rely on them.
+    var voiceoverAssets: [String: AVURLAsset] {
+        for file in Set(edit.voiceovers.map(\.file)) where voiceoverAssetCache[file] == nil {
+            voiceoverAssetCache[file] = AVURLAsset(url: bundle.voiceoverURL(file))
+        }
+        return voiceoverAssetCache
+    }
+
+    @MainActor
+    private func loadVoiceoverWaveforms() async {
+        for file in Set(edit.voiceovers.map(\.file)) where voiceoverWaveforms[file] == nil {
+            let asset = AVURLAsset(url: bundle.voiceoverURL(file))
+            voiceoverWaveforms[file] = await Task.detached(priority: .utility) {
+                await Waveform.load(asset: asset, hasSystem: false, hasMic: true)
+            }.value
+        }
+    }
+
+    /// Gain and gate the voiceover waveform is drawn with, matching what is heard.
+    var voiceoverWaveformGain: (gain: Float, gate: Float) {
+        let auto = edit.normalizeAudio ? AudioLeveling.dbToGain(edit.voiceoverAutoGain ?? 0) : 1
+        return (auto * Float(edit.voiceoverVolume), AudioLeveling.voiceoverGateLevel(for: edit))
     }
 
     /// Gains the waveform is drawn with, matching what is heard.
@@ -333,13 +373,20 @@ final class EditorModel {
         refreshRenderState()
         if timelineChanged || old.style.aspect != edit.style.aspect || old.style.background.kind != edit.style.background.kind
             || old.micVolume != edit.micVolume || old.systemVolume != edit.systemVolume
-            || old.normalizeAudio != edit.normalizeAudio || old.micAutoGain != edit.micAutoGain {
+            || old.normalizeAudio != edit.normalizeAudio || old.micAutoGain != edit.micAutoGain
+            || old.voiceovers != edit.voiceovers || old.voiceoverVolume != edit.voiceoverVolume
+            || old.voiceoverAutoGain != edit.voiceoverAutoGain || old.voiceoverNoiseFloor != edit.voiceoverNoiseFloor {
             scheduleRebuild()
         }
         scheduleSave()
     }
 
     private func scheduleRebuild() {
+        // A new player item would pull the running recording's clock out from under it.
+        if voiceoverPhase != .idle {
+            rebuildAfterVoiceover = true
+            return
+        }
         rebuildTask?.cancel()
         rebuildTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(120))
@@ -350,7 +397,7 @@ final class EditorModel {
 
     @MainActor
     private func rebuildPlayerItem() async {
-        let builder = CompositionBuilder(bundle: bundle, meta: meta, assets: assets, cameraAssets: cameraAssets)
+        let builder = CompositionBuilder(bundle: bundle, meta: meta, assets: assets, cameraAssets: cameraAssets, voiceoverAssets: voiceoverAssets)
         let size = renderState.canvasSize(longSide: min(Self.previewLongSide, renderState.nativeLongSide))
         do {
             let result = try await builder.build(timeline: timeline, box: box, renderSize: size, fps: 60, edit: edit)
@@ -382,6 +429,10 @@ final class EditorModel {
     var sourceTime: Double { timeline.sourceTime(currentTime) }
 
     func togglePlay() {
+        if voiceoverPhase != .idle {
+            toggleVoiceover()
+            return
+        }
         stopAtRangeEnd(nil)
         if skimTime != nil { skim(to: nil) }
         if player.rate != 0 {
@@ -407,7 +458,7 @@ final class EditorModel {
 
     /// Shows the frame at `comp` without moving the playhead; nil goes back to the playhead.
     func skim(to comp: Double?) {
-        guard skimEnabled || comp == nil, player.rate == 0 else { return }
+        guard skimEnabled || comp == nil, player.rate == 0, voiceoverPhase == .idle else { return }
         if let comp {
             let t = comp.clamped(0, max(0, duration - 0.001))
             skimTime = t
@@ -451,7 +502,7 @@ final class EditorModel {
     var canRedo: Bool { !redoStack.isEmpty }
 
     func undo() {
-        guard let prev = undoStack.popLast() else { return }
+        guard voiceoverPhase == .idle, let prev = undoStack.popLast() else { return }
         range = nil
         redoStack.append(edit)
         applyingUndo = true
@@ -460,12 +511,168 @@ final class EditorModel {
     }
 
     func redo() {
-        guard let next = redoStack.popLast() else { return }
+        guard voiceoverPhase == .idle, let next = redoStack.popLast() else { return }
         range = nil
         undoStack.append(edit)
         applyingUndo = true
         edit = next
         applyingUndo = false
+    }
+
+    // MARK: - Voiceover
+
+    /// R, the 配音 button, and space while recording: start, cancel the countdown, or finish.
+    func toggleVoiceover() {
+        switch voiceoverPhase {
+        case .idle: Task { @MainActor in await self.startVoiceover() }
+        case .countdown, .preparing: cancelVoiceover()
+        case .recording: Task { @MainActor in await self.stopVoiceover() }
+        case .finishing: break
+        }
+    }
+
+    /// Starts the mic, counts down, then plays from the playhead at normal speed and records over it.
+    @MainActor
+    private func startVoiceover() async {
+        guard isReady, voiceoverPhase == .idle, duration > 0.2 else { return }
+        voiceoverPhase = .preparing
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            _ = await AVCaptureDevice.requestAccess(for: .audio)
+            Permissions.shared.refresh()
+        }
+        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+            voiceoverPhase = .idle
+            statusMessage = "没有麦克风权限，请在系统设置里允许 Takes 使用麦克风"
+            Permissions.shared.requestMicrophone()
+            return
+        }
+        stopAtRangeEnd(nil)
+        skim(to: nil)
+        player.pause()
+        isPlaying = false
+        range = nil
+        tool = .select
+        statusMessage = nil
+        if currentTime >= duration - 0.05 { seek(comp: 0) }
+
+        let recorder: VoiceoverRecorder
+        do {
+            try FileManager.default.createDirectory(at: bundle.voiceoverDir, withIntermediateDirectories: true)
+            let file = "voiceover-\(UUID().uuidString.prefix(8)).m4a"
+            recorder = try VoiceoverRecorder(url: bundle.voiceoverURL(file))
+            voiceoverRecorder = recorder
+            try await recorder.startCapture(deviceID: AppSettings.shared.micDeviceID)
+        } catch {
+            voiceoverRecorder?.cancel()
+            voiceoverRecorder = nil
+            voiceoverPhase = .idle
+            statusMessage = "无法启动麦克风：\(error.localizedDescription)"
+            return
+        }
+        await rebuildTask?.value
+        for n in [3, 2, 1] {
+            guard voiceoverRecorder === recorder else { return }
+            voiceoverPhase = .countdown(n)
+            try? await Task.sleep(for: .seconds(1))
+        }
+        guard voiceoverRecorder === recorder, let timebase = player.currentItem?.timebase else {
+            if voiceoverRecorder === recorder { cancelVoiceover() }
+            return
+        }
+        rateBeforeVoiceover = playbackRate
+        playbackRate = 1
+        // The speakers would otherwise leak into the mic.
+        player.isMuted = true
+        voiceoverStart = currentTime
+        voiceoverLevels = []
+        recorder.onLevel = { [weak self] t, level in self?.voiceoverLevels.append((t, level)) }
+        recorder.listen(to: timebase)
+        player.playImmediately(atRate: 1)
+        isPlaying = true
+        voiceoverPhase = .recording
+    }
+
+    /// Drops a recording that has not started yet.
+    private func cancelVoiceover() {
+        voiceoverRecorder?.cancel()
+        voiceoverRecorder = nil
+        voiceoverPhase = .idle
+    }
+
+    @MainActor
+    private func stopVoiceover() async {
+        guard voiceoverPhase == .recording, let recorder = voiceoverRecorder else { return }
+        voiceoverPhase = .finishing
+        player.pause()
+        isPlaying = false
+        let runs = VoiceoverLayout.trimmed(await recorder.stop(), from: voiceoverStart)
+        voiceoverRecorder = nil
+        player.isMuted = false
+        playbackRate = rateBeforeVoiceover
+        await commitVoiceover(file: recorder.url.lastPathComponent, runs: runs)
+        voiceoverLevels = []
+        voiceoverPhase = .idle
+        if rebuildAfterVoiceover {
+            rebuildAfterVoiceover = false
+            scheduleRebuild()
+        }
+        seek(comp: voiceoverStart)
+        saveNow()
+    }
+
+    /// Turns a finished recording into pieces on the timeline. New narration replaces what it records over.
+    @MainActor
+    func commitVoiceover(file: String, runs: [VoiceoverRun]) async {
+        let added = VoiceoverLayout.pieces(file: file, runs: runs, timeline: timeline)
+        let total = added.reduce(0) { $0 + $1.duration }
+        guard total > 0.1 else {
+            try? FileManager.default.removeItem(at: bundle.voiceoverURL(file))
+            statusMessage = "没有录到声音"
+            return
+        }
+        var e = edit
+        e.voiceovers = VoiceoverLayout.overlaying(added, on: e.voiceovers)
+        let takes = Set(e.voiceovers.map(\.file)).map { AVURLAsset(url: bundle.voiceoverURL($0)) }
+        let analysis = await Task.detached(priority: .userInitiated) {
+            await AudioLeveling.analyze(assets: takes, micTrackIndex: 0)
+        }.value
+        e.voiceoverAutoGain = analysis?.gain ?? 0
+        e.voiceoverNoiseFloor = analysis?.noiseFloor
+        // The whole recording is one undo step, measured gain included.
+        lastUndoPush = .distantPast
+        edit = e
+        statusMessage = String(format: "已录入 %.1f 秒配音，按空格回听，⌘Z 撤销", total)
+        await loadVoiceoverWaveforms()
+    }
+
+    /// Finishes a running recording when the window closes, and keeps it.
+    func finishVoiceoverOnClose() {
+        switch voiceoverPhase {
+        case .recording: toggleVoiceover()
+        case .countdown, .preparing: cancelVoiceover()
+        case .idle, .finishing: break
+        }
+    }
+
+    /// Whether the selected output range has narration in it.
+    var rangeHasVoiceover: Bool {
+        guard let r = range else { return false }
+        return VoiceoverLayout.placements(edit.voiceovers, entries: timeline.entries)
+            .contains { $0.at < r.upperBound && $0.at + $0.duration > r.lowerBound }
+    }
+
+    /// Removes the narration in the selected output range and keeps the picture.
+    func deleteVoiceoverInRange() {
+        guard let r = range else { return }
+        var pieces = edit.voiceovers
+        for e in timeline.entries {
+            let a = max(r.lowerBound, e.compStart), b = min(r.upperBound, e.compEnd)
+            guard b > a else { continue }
+            pieces = VoiceoverLayout.removing(start: e.sourceStart + a - e.compStart, end: e.sourceStart + b - e.compStart, from: pieces)
+        }
+        edit.voiceovers = pieces
+        range = nil
+        selection = .none
     }
 
     // MARK: - Persistence
@@ -508,6 +715,7 @@ final class EditorModel {
 
     /// Splits the clip under the playhead in two (剪映's "分割").
     func splitAtPlayhead() {
+        if cutSelectedItem(.split) { return }
         let t = currentTime
         guard let entry = timeline.entries.first(where: { t > $0.compStart + 0.05 && t < $0.compEnd - 0.05 }),
               let i = edit.clips.firstIndex(where: { $0.id == entry.clipID }) else {
@@ -527,6 +735,7 @@ final class EditorModel {
 
     /// 剪映's 向左裁剪 / 向右裁剪: drop the part of the clip under the playhead that lies left (or right) of it.
     func trimAtPlayhead(keepRight: Bool) {
+        if cutSelectedItem(keepRight ? .keepRight : .keepLeft) { return }
         let t = currentTime
         guard let entry = timeline.entries.first(where: { t > $0.compStart + 0.05 && t < $0.compEnd - 0.05 }),
               let i = edit.clips.firstIndex(where: { $0.id == entry.clipID }) else {
@@ -543,6 +752,73 @@ final class EditorModel {
         }
         selection = .clip(edit.clips[i].id)
         statusMessage = nil
+    }
+
+    /// Name of the selected track item that S, Q and W act on instead of the video.
+    var cutTargetName: String? {
+        switch selection {
+        case .zoom: "缩放"
+        case .annotation: "标注"
+        case .blur: "打码"
+        case .voiceover: "配音"
+        case .clip, .none: nil
+        }
+    }
+
+    /// Applies a cut to the selected track item. False when no such item is selected, so the cut goes to the
+    /// video. With one selected the cut never falls through: that would silently remove picture.
+    private func cutSelectedItem(_ cut: PlayheadCut) -> Bool {
+        switch selection {
+        case .zoom(let id): cutItem(\.zooms, id: id, cut, select: EditorSelection.zoom)
+        case .annotation(let id): cutItem(\.annotations, id: id, cut, select: EditorSelection.annotation)
+        case .blur(let id): cutItem(\.blurs, id: id, cut, select: EditorSelection.blur)
+        case .voiceover(let id): cutItem(\.voiceovers, id: id, cut, select: EditorSelection.voiceover)
+        case .clip, .none: return false
+        }
+        return true
+    }
+
+    private func cutItem<T: TimelineItem & Identifiable>(_ path: WritableKeyPath<EditDocument, [T]>, id: UUID, _ cut: PlayheadCut,
+                                                          select: (UUID) -> EditorSelection) where T.ID == UUID {
+        let t = sourceTime
+        guard let i = edit[keyPath: path].firstIndex(where: { $0.id == id }) else { return }
+        let item = edit[keyPath: path][i]
+        guard t > item.start + 0.05, t < item.end - 0.05 else {
+            statusMessage = "把播放头移到选中的\(cutTargetName ?? "内容")中间再操作"
+            return
+        }
+        var left = item, right = item
+        left.trim(start: item.start, end: t)
+        right.trim(start: t, end: item.end)
+        switch cut {
+        case .split:
+            right.id = UUID()
+            edit[keyPath: path].replaceSubrange(i...i, with: [left, right])
+            selection = select(right.id)
+        case .keepRight:
+            edit[keyPath: path][i] = right
+        case .keepLeft:
+            edit[keyPath: path][i] = left
+        }
+        statusMessage = nil
+    }
+
+    /// Moves a voiceover edge, limited by what was recorded there and by the pieces next to it.
+    func trimVoiceover(_ id: UUID, start: Double? = nil, end: Double? = nil) {
+        guard let i = edit.voiceovers.firstIndex(where: { $0.id == id }) else { return }
+        var piece = edit.voiceovers[i]
+        let others = edit.voiceovers.filter { $0.id != id }
+        var newStart = piece.start, newEnd = piece.end
+        if let start {
+            let floor = max(piece.sourceMin ?? piece.start, others.filter { $0.end <= piece.start + 0.001 }.map(\.end).max() ?? 0)
+            newStart = start.clamped(min(floor, piece.start), piece.end - 0.2)
+        }
+        if let end {
+            let ceiling = min(piece.sourceMax ?? piece.end, others.filter { $0.start >= piece.end - 0.001 }.map(\.start).min() ?? .infinity)
+            newEnd = end.clamped(piece.start + 0.2, max(ceiling, piece.end))
+        }
+        piece.trim(start: newStart, end: newEnd)
+        edit.voiceovers[i] = piece
     }
 
     /// I: the range starts at the playhead (and runs to the end until O is pressed).
@@ -656,11 +932,16 @@ final class EditorModel {
         let target = hovered != .none ? hovered : selection
         hovered = .none
         if target != selection { selection = .none }
+        delete(target)
+    }
+
+    func delete(_ target: EditorSelection) {
         switch target {
         case .zoom(let id): edit.zooms.removeAll { $0.id == id }
         case .annotation(let id): edit.annotations.removeAll { $0.id == id }
         case .blur(let id): edit.blurs.removeAll { $0.id == id }
         case .clip(let id): deleteClip(id); return
+        case .voiceover(let id): edit.voiceovers.removeAll { $0.id == id }
         case .none: return
         }
         selection = .none

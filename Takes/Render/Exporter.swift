@@ -76,7 +76,7 @@ enum Exporter {
                        progress: @escaping @MainActor (Double) -> Void) async throws {
         let state = model.renderState
         let box = RenderStateBox(state)
-        let builder = CompositionBuilder(bundle: model.bundle, meta: model.meta, assets: model.assets, cameraAssets: model.cameraAssets)
+        let builder = CompositionBuilder(bundle: model.bundle, meta: model.meta, assets: model.assets, cameraAssets: model.cameraAssets, voiceoverAssets: model.voiceoverAssets)
 
         switch options.format {
         case .mp4:

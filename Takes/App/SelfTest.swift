@@ -24,7 +24,7 @@ enum SelfTest {
                 let model = try EditorModel(bundle: ProjectBundle(url: bundle))
                 for _ in 0..<100 where !model.isReady { await wait(0.1) }
                 let state = model.renderState
-                let builder = CompositionBuilder(bundle: model.bundle, meta: model.meta, assets: model.assets, cameraAssets: model.cameraAssets)
+                let builder = CompositionBuilder(bundle: model.bundle, meta: model.meta, assets: model.assets, cameraAssets: model.cameraAssets, voiceoverAssets: model.voiceoverAssets)
                 let size = state.canvasSize(longSide: state.nativeLongSide)
                 let result = try await builder.build(timeline: model.timeline, box: RenderStateBox(state), renderSize: size, fps: 30, edit: model.edit)
                 let generator = AVAssetImageGenerator(asset: result.composition)
@@ -41,8 +41,8 @@ enum SelfTest {
         }
     }
 
-    /// `Takes --export <xxx.takes> <out.mp4>`: exports with the saved edit (after loudness analysis).
-    static func exportProject(bundle: URL, to out: URL) {
+    /// `Takes --export <xxx.takes> <out.mp4> [fps]`: exports with the saved edit (after loudness analysis).
+    static func exportProject(bundle: URL, to out: URL, fps: Int = 30) {
         Task { @MainActor in
             do {
                 let model = try EditorModel(bundle: ProjectBundle(url: bundle))
@@ -51,7 +51,7 @@ enum SelfTest {
                 }
                 log(String(format: "mic auto gain %.1f dB", model.edit.micAutoGain ?? -1))
                 try? FileManager.default.removeItem(at: out)
-                try await Exporter.export(model: model, options: ExportOptions(resolution: .p720, fps: 30), to: out) { _ in }
+                try await Exporter.export(model: model, options: ExportOptions(resolution: .p720, fps: fps), to: out) { _ in }
                 log("exported")
             } catch {
                 log("FAIL \(error)")
@@ -158,9 +158,13 @@ enum SelfTest {
 
         // 3. Render stills through the real compositor.
         let state = model.renderState
-        let builder = CompositionBuilder(bundle: bundle, meta: meta, assets: model.assets, cameraAssets: model.cameraAssets)
+        let builder = CompositionBuilder(bundle: bundle, meta: meta, assets: model.assets, cameraAssets: model.cameraAssets, voiceoverAssets: model.voiceoverAssets)
         let size = state.canvasSize(longSide: 1600)
         let result = try await builder.build(timeline: model.timeline, box: RenderStateBox(state), renderSize: size, fps: 30, edit: model.edit)
+        // A hole in the screen track means a frame with no source, which fails playback and export.
+        let holes = result.composition.tracks(withMediaType: .video).first?.segments.filter(\.isEmpty).count ?? 0
+        log("screen track holes=\(holes)")
+        if holes > 0 { throw NSError(domain: "composition has holes in its screen track", code: 3) }
         let generator = AVAssetImageGenerator(asset: result.composition)
         generator.videoComposition = result.videoComposition
         generator.requestedTimeToleranceBefore = .zero
