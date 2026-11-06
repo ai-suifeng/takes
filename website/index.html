@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Takes · Mac 录屏，录错了只重录这一段</title>
-<meta name="description" content="Takes 是一款免费的 Mac 录屏软件：随时暂停、分段重录，录完自动缩放跟随光标，剪辑拖一下就删，敏感信息一键打码。">
+<meta name="description" content="Takes 是一款免费的 Mac 录屏软件，适合自媒体和教程作者：随时暂停、分段重录，录完自动放大跟随光标，敏感信息一键打码，边看边补配音。">
 <link rel="icon" href="icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -128,6 +128,11 @@ h2 { margin: 0 0 14px; font: 900 clamp(30px, 4vw, 44px)/1.2 "Noto Sans SC", sans
 .wave { height: 34px; display: flex; align-items: center; gap: 2px; }
 .wave i { flex: 1; background: #2DB88C; border-radius: 1px; }
 .sel { position: absolute; top: 0; bottom: 0; left: 38%; width: 22%; background: rgba(255,59,69,.28); border: 2px solid var(--rec); border-radius: 8px; z-index: 1; }
+.vo-track { height: 44px; border-radius: 8px; background: rgba(255,184,51,.14); position: relative; overflow: hidden; margin-top: 10px; }
+.vo-track .wave { position: absolute; left: 0; top: 5px; width: 64%; padding: 0 8px; }
+.vo-track .wave i { background: var(--amber); }
+.vo-head { position: absolute; top: -64px; bottom: 0; left: 64%; width: 2px; background: var(--rec); }
+.vo-rec { display: inline-flex; gap: 8px; align-items: center; background: var(--rec); color: #fff; border-radius: 999px; padding: 3px 12px; font-size: 12px; font-weight: 700; margin-bottom: 10px; }
 .sel-bar { display: inline-flex; gap: 8px; align-items: center; background: var(--rec); color: #fff; border-radius: 999px; padding: 3px 12px; font-size: 12px; font-weight: 700; margin: 0 0 10px 38%; }
 .kbd { display: inline-block; border: 1px solid var(--line); border-bottom-width: 3px; border-radius: 6px; padding: 0 7px; font: 500 14px/1.6 "Bricolage Grotesque", sans-serif; color: var(--ink); background: var(--surface); }
 
@@ -282,6 +287,7 @@ footer { border-top: 1px solid var(--line); padding: 28px 0 40px; font-size: 14p
             <ul>
               <li>鼠标悬停就能预览那一帧，不用拖动播放头</li>
               <li>选中后可以先播放这一段，确认了再删</li>
+              <li>分割、向左 / 向右裁剪对配音、缩放、标注、打码各条轨道都有效</li>
               <li>0.5× 到 2× 倍速快速过一遍，所有操作都能撤销</li>
             </ul>
           </div>
@@ -290,6 +296,28 @@ footer { border-top: 1px solid var(--line); padding: 28px 0 40px; font-size: 14p
             <div class="track"><div class="sel"></div></div>
             <div class="wave" aria-hidden="true">
               <i style="height:30%"></i><i style="height:70%"></i><i style="height:90%"></i><i style="height:60%"></i><i style="height:80%"></i><i style="height:40%"></i><i style="height:75%"></i><i style="height:55%"></i><i style="height:4%"></i><i style="height:4%"></i><i style="height:4%"></i><i style="height:4%"></i><i style="height:4%"></i><i style="height:4%"></i><i style="height:65%"></i><i style="height:85%"></i><i style="height:50%"></i><i style="height:95%"></i><i style="height:70%"></i><i style="height:35%"></i>
+            </div>
+          </div>
+        </div>
+
+        <div class="feature">
+          <div>
+            <h3>画面没声音？边看边补配音</h3>
+            <p>录的时候没开麦克风，或者想重新讲一遍？在编辑器里按 <span class="kbd">R</span>，视频从播放头开始播放，你看着画面讲就行。每段声音都和录它时的画面逐帧对齐。</p>
+            <ul>
+              <li>之后剪掉画面，对应的配音会跟着一起删掉</li>
+              <li>配音可以单独分割、裁剪、调音量，也参与声音增强</li>
+              <li>录得不满意，在同一位置再录一次就会覆盖</li>
+            </ul>
+          </div>
+          <div class="art">
+            <div class="vo-rec">● 录音中 · 和画面逐帧对齐</div>
+            <div class="track"></div>
+            <div class="vo-track">
+              <div class="wave" aria-hidden="true">
+                <i style="height:40%"></i><i style="height:75%"></i><i style="height:55%"></i><i style="height:90%"></i><i style="height:35%"></i><i style="height:70%"></i><i style="height:85%"></i><i style="height:50%"></i><i style="height:65%"></i><i style="height:30%"></i><i style="height:80%"></i><i style="height:60%"></i><i style="height:45%"></i><i style="height:75%"></i>
+              </div>
+              <div class="vo-head"></div>
             </div>
           </div>
         </div>
@@ -330,7 +358,7 @@ footer { border-top: 1px solid var(--line); padding: 28px 0 40px; font-size: 14p
       <ol class="steps">
         <li><strong>下载</strong><span>点上面的下载按钮，得到 <code>Takes.zip</code>。</span></li>
         <li><strong>拖进「应用程序」</strong><span>双击解压，把 Takes 拖到「应用程序」文件夹。</span></li>
-        <li><strong>第一次打开</strong><span>按住 Control 点 Takes，选「打开」，再点「打开」。如果仍被拦截，到「系统设置 → 隐私与安全性」点「仍要打开」。</span></li>
+        <li><strong>第一次打开</strong><span>双击 Takes，在提示里点「完成」；再打开「系统设置 → 隐私与安全性」，在底部 Takes 那一行点「仍要打开」并确认。只需要做一次。</span></li>
         <li><strong>授权</strong><span>按引导打开屏幕录制权限，然后重新打开 Takes。麦克风、摄像头按需开启。</span></li>
       </ol>
     </section>
@@ -344,6 +372,7 @@ footer { border-top: 1px solid var(--line); padding: 28px 0 40px; font-size: 14p
         <details><summary>能录系统声音吗？</summary><p>可以。系统声音、麦克风和摄像头可以同时录，摄像头画面会以画中画的方式显示。</p></details>
         <details><summary>录完还能改缩放和光标吗？</summary><p>能。缩放、光标、标注、打码都是录完之后再加上去的，随时可以改，原始录像不会被改动。</p></details>
         <details><summary>为什么提示「无法验证开发者」？</summary><p>因为 Takes 没有付费做 Apple 公证。按安装第 3 步操作一次即可，以后正常打开。</p></details>
+        <details><summary>提示「Takes 已损坏，无法打开」怎么办？</summary><p>这是下载时被系统加上了隔离标记。在「终端」里执行 <code>xattr -dr com.apple.quarantine /Applications/Takes.app</code> 后再打开即可。</p></details>
       </div>
     </section>
 

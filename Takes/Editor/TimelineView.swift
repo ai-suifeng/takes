@@ -2,14 +2,18 @@ import SwiftUI
 
 /// Output-time timeline (like 剪映): clips sit back to back, and cutting or trimming closes the gap.
 /// Zooms, annotations and blurs are stored in source time and mapped onto it.
+/// Heights of the always-visible tracks.
+private let clipTrackHeight: CGFloat = 48
+private let audioTrackHeight: CGFloat = 28
+
 struct EditorTimeline: View {
     @Bindable var model: EditorModel
     private let labelWidth: CGFloat = 92
     private let rulerHeight: CGFloat = 22
-    private let collapsedHeight: CGFloat = 18
     /// Expanded optional tracks (配音/缩放/标注/打码), comma separated. Collapsed by default to leave room for the preview.
     @AppStorage("timelineExpandedTracks") private var expandedRaw = ""
     @State private var controlsHeight: CGFloat = 50
+    @State private var trackBarHeight: CGFloat = 30
 
     enum OptionalTrack: String, CaseIterable { case voiceover, zoom, annotation, blur }
 
@@ -26,6 +30,8 @@ struct EditorTimeline: View {
             controls
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { controlsHeight = $0 }
             Divider().opacity(0.5)
+            trackBar
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { trackBarHeight = $0 }
             GeometryReader { geo in
                 let total = max(model.duration, 0.5)
                 let fit = (Double(geo.size.width) - Double(labelWidth) - 24) / total
@@ -34,7 +40,7 @@ struct EditorTimeline: View {
                 // +16 leaves room for the horizontal scroller, which takes height when scroll bars are always shown.
                 let height = max(tracksHeight + 16, geo.size.height)
                 ScrollView(.vertical, showsIndicators: true) {
-                HStack(spacing: 0) {
+                HStack(alignment: .top, spacing: 0) {
                     labels
                     ScrollView(.horizontal, showsIndicators: true) {
                         ZStack(alignment: .topLeading) {
@@ -43,9 +49,9 @@ struct EditorTimeline: View {
                                     .frame(height: rulerHeight)
                                     .contentShape(Rectangle())
                                     .gesture(scrub(pps: pps))
-                                ClipsTrack(model: model, pps: pps).frame(height: 58)
+                                ClipsTrack(model: model, pps: pps).frame(height: clipTrackHeight)
                                 if hasAudio {
-                                    AudioTrack(model: model, pps: pps).frame(height: 34)
+                                    AudioTrack(model: model, pps: pps).frame(height: audioTrackHeight)
                                         .contentShape(Rectangle())
                                         .onTapGesture(coordinateSpace: .named("timeline")) { p in
                                             model.range = nil
@@ -56,23 +62,15 @@ struct EditorTimeline: View {
                                 }
                                 if isOpen(.voiceover) {
                                     VoiceoverTrack(model: model, pps: pps).frame(height: voiceoverHeight)
-                                } else {
-                                    collapsedStrip(.voiceover, pps: pps)
                                 }
                                 if isOpen(.zoom) {
                                     ZoomTrack(model: model, pps: pps).frame(height: 26)
-                                } else {
-                                    collapsedStrip(.zoom, pps: pps)
                                 }
                                 if isOpen(.annotation) {
                                     AnnotationTrack(model: model, pps: pps).frame(height: annotationTrackHeight)
-                                } else {
-                                    collapsedStrip(.annotation, pps: pps)
                                 }
                                 if isOpen(.blur) {
                                     BlurTrack(model: model, pps: pps).frame(height: 26)
-                                } else {
-                                    collapsedStrip(.blur, pps: pps)
                                 }
                             }
                             .padding(.vertical, 6)
@@ -85,7 +83,7 @@ struct EditorTimeline: View {
                             }
                             if let r = model.range {
                                 RangeOverlay(model: model, range: r, pps: pps,
-                                             top: 6 + rulerHeight + 6, height: 58 + (hasAudio ? 6 + 34 : 0) + 6 + voiceoverHeight)
+                                             top: 6 + rulerHeight + 6, height: clipTrackHeight + (hasAudio ? 6 + audioTrackHeight : 0) + (isOpen(.voiceover) ? 6 + voiceoverHeight : 0))
                             }
                             if let t = model.skimTime {
                                 SkimLine(time: t, height: height).offset(x: t * pps)
@@ -106,7 +104,7 @@ struct EditorTimeline: View {
         }
         .background(.background.secondary)
         // Height that shows every track without scrolling; the editor sizes the panel to it until the user drags.
-        .preference(key: TimelineIdealHeightKey.self, value: controlsHeight + 1 + tracksHeight + 16)
+        .preference(key: TimelineIdealHeightKey.self, value: controlsHeight + 1 + trackBarHeight + tracksHeight + 16)
         // Open a collapsed track when something on it is selected, added or being recorded.
         .onChange(of: model.selection) { _, sel in
             switch sel {
@@ -126,17 +124,6 @@ struct EditorTimeline: View {
         .onChange(of: model.edit.blurs.count) { old, new in if new > old, !isOpen(.blur) { setOpen(.blur, true) } }
     }
 
-    private func spans(_ t: OptionalTrack) -> [(Double, Double)] {
-        let items: [(Double, Double)]
-        switch t {
-        case .voiceover: items = model.edit.voiceovers.map { ($0.start, $0.end) }
-        case .zoom: items = model.edit.zooms.map { ($0.start, $0.end) }
-        case .annotation: items = model.edit.annotations.map { ($0.start, $0.end) }
-        case .blur: items = model.edit.blurs.map { ($0.start, $0.end) }
-        }
-        return items.compactMap { model.timeline.compRange(start: $0.0, end: $0.1) }
-    }
-
     private func trackColor(_ t: OptionalTrack) -> Color {
         switch t {
         case .voiceover: Theme.pauseAmber
@@ -146,20 +133,39 @@ struct EditorTimeline: View {
         }
     }
 
-    /// A collapsed track: thin marks where its items are, so you can see there is something there. Click to open.
-    private func collapsedStrip(_ t: OptionalTrack, pps: Double) -> some View {
-        ZStack(alignment: .leading) {
-            RoundedRectangle(cornerRadius: 4).fill(.primary.opacity(0.03))
-            ForEach(Array(spans(t).enumerated()), id: \.offset) { _, span in
-                Capsule().fill(trackColor(t).opacity(0.8))
-                    .frame(width: max(3, (span.1 - span.0) * pps), height: 6)
-                    .offset(x: span.0 * pps)
-            }
+    /// One row of switches for the optional tracks; only switched-on tracks take a row below.
+    private var trackBar: some View {
+        HStack(spacing: 6) {
+            Text("轨道").font(.system(size: 11, weight: .medium)).foregroundStyle(.tertiary)
+                .frame(width: labelWidth - 6, alignment: .leading)
+            trackChip(.voiceover, "配音", "mic", count: model.edit.voiceovers.count)
+            trackChip(.zoom, "缩放", "plus.magnifyingglass", count: model.edit.zooms.count)
+            trackChip(.annotation, "标注", "pencil.and.outline", count: model.edit.annotations.count)
+            trackChip(.blur, "打码", "eye.slash", count: model.edit.blurs.count)
+            Spacer()
         }
-        .frame(height: collapsedHeight)
-        .contentShape(Rectangle())
-        .onTapGesture { setOpen(t, true) }
-        .help("点击展开")
+        .padding(.leading, 14).padding(.trailing, 12)
+        .padding(.vertical, 4)
+    }
+
+    private func trackChip(_ t: OptionalTrack, _ text: String, _ symbol: String, count: Int) -> some View {
+        let open = isOpen(t)
+        let color = trackColor(t)
+        return Button { setOpen(t, !open) } label: {
+            HStack(spacing: 4) {
+                Image(systemName: symbol).font(.system(size: 10, weight: .semibold))
+                Text(text).font(.system(size: 11, weight: .medium))
+                if count > 0 {
+                    Text("\(count)").font(.system(size: 10, weight: .semibold)).monospacedDigit().opacity(0.75)
+                }
+            }
+            .padding(.horizontal, 9).frame(height: 22)
+            .foregroundStyle(open ? Color.white : color)
+            .background(open ? AnyShapeStyle(color) : AnyShapeStyle(color.opacity(count > 0 ? 0.14 : 0.07)), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(open ? "隐藏\(text)轨道" : "显示\(text)轨道")
     }
 
     private var controls: some View {
@@ -292,13 +298,15 @@ struct EditorTimeline: View {
     }
 
     private var hasAudio: Bool { model.meta.hasMic || model.meta.hasSystemAudio }
-    private var voiceoverHeight: CGFloat { isOpen(.voiceover) ? 34 : collapsedHeight }
-    private var zoomHeight: CGFloat { isOpen(.zoom) ? 26 : collapsedHeight }
-    private var blurHeight: CGFloat { isOpen(.blur) ? 26 : collapsedHeight }
+    private var voiceoverHeight: CGFloat { 34 }
 
     /// Full height of the ruler plus every track, matching the stack in `body`.
     private var tracksHeight: CGFloat {
-        let rows: [CGFloat] = [rulerHeight, 58] + (hasAudio ? [34] : []) + [voiceoverHeight, zoomHeight, annotationTrackHeight, blurHeight]
+        var rows: [CGFloat] = [rulerHeight, clipTrackHeight] + (hasAudio ? [audioTrackHeight] : [])
+        if isOpen(.voiceover) { rows.append(voiceoverHeight) }
+        if isOpen(.zoom) { rows.append(26) }
+        if isOpen(.annotation) { rows.append(annotationTrackHeight) }
+        if isOpen(.blur) { rows.append(26) }
         return rows.reduce(0, +) + CGFloat(rows.count - 1) * 6 + 12 + 8
     }
 
@@ -317,49 +325,37 @@ struct EditorTimeline: View {
     }
 
     private var annotationTrackHeight: CGFloat {
-        guard isOpen(.annotation) else { return collapsedHeight }
-        return CGFloat(min(3, max(1, Lanes.assign(model.edit.annotations.map { ($0.start, $0.end) }).count))) * 22 + 4
+        CGFloat(min(3, max(1, Lanes.assign(model.edit.annotations.map { ($0.start, $0.end) }).count))) * 22 + 4
     }
 
     private var labels: some View {
         VStack(alignment: .leading, spacing: 6) {
             Color.clear.frame(height: rulerHeight)
-            label("片段", "film.stack", height: 58)
-            if hasAudio { label("声音", "waveform", height: 34) }
-            toggleLabel(.voiceover, "配音", "mic", count: model.edit.voiceovers.count, height: voiceoverHeight)
-            toggleLabel(.zoom, "缩放", "plus.magnifyingglass", count: model.edit.zooms.count, height: zoomHeight)
-            toggleLabel(.annotation, "标注", "pencil.and.outline", count: model.edit.annotations.count, height: annotationTrackHeight)
-            toggleLabel(.blur, "打码", "eye.slash", count: model.edit.blurs.count, height: blurHeight)
+            label("片段", "film.stack", height: clipTrackHeight)
+            if hasAudio { label("声音", "waveform", height: audioTrackHeight) }
+            if isOpen(.voiceover) { toggleLabel(.voiceover, "配音", "mic", height: voiceoverHeight) }
+            if isOpen(.zoom) { toggleLabel(.zoom, "缩放", "plus.magnifyingglass", height: 26) }
+            if isOpen(.annotation) { toggleLabel(.annotation, "标注", "pencil.and.outline", height: annotationTrackHeight) }
+            if isOpen(.blur) { toggleLabel(.blur, "打码", "eye.slash", height: 26) }
         }
         .padding(.vertical, 6)
         .frame(width: labelWidth, alignment: .leading)
         .padding(.leading, 14)
     }
 
-    /// Label of an optional track; click to collapse or expand it. Shows how many items it holds.
-    private func toggleLabel(_ t: OptionalTrack, _ text: String, _ symbol: String, count: Int, height: CGFloat) -> some View {
-        let open = isOpen(t)
-        return Button { setOpen(t, !open) } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 8, weight: .bold))
-                    .rotationEffect(.degrees(open ? 90 : 0))
-                    .frame(width: 9)
-                Image(systemName: symbol).font(.system(size: open ? 11 : 9, weight: .medium))
-                Text(text).font(.system(size: open ? 11 : 10, weight: .medium))
-                if count > 0 {
-                    Text("\(count)").font(.system(size: 9, weight: .semibold)).monospacedDigit()
-                        .padding(.horizontal, 4).padding(.vertical, 0.5)
-                        .background(.primary.opacity(0.08), in: Capsule())
-                }
+    /// Label of a shown optional track; the × hides it again (the switch in the track bar does the same).
+    private func toggleLabel(_ t: OptionalTrack, _ text: String, _ symbol: String, height: CGFloat) -> some View {
+        HStack(spacing: 4) {
+            Label(text, systemImage: symbol).font(.system(size: 11, weight: .medium))
+            Button { setOpen(t, false) } label: {
+                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                    .frame(width: 16, height: 16).contentShape(Rectangle())
             }
-            .foregroundStyle(.secondary)
-            .frame(height: height)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            .help("隐藏\(text)轨道")
         }
-        .buttonStyle(.plain)
-        .help(open ? "收起\(text)轨道" : "展开\(text)轨道")
+        .foregroundStyle(.secondary)
+        .frame(height: height)
     }
 
     private func label(_ text: String, _ symbol: String, height: CGFloat) -> some View {
@@ -574,7 +570,7 @@ private struct ClipBlock: View {
 
         ZStack(alignment: .leading) {
             Filmstrip(images: stripImages)
-                .frame(width: width, height: 58)
+                .frame(width: width, height: clipTrackHeight)
                 .clipped()
             VStack {
                 HStack(spacing: 4) {
@@ -594,7 +590,7 @@ private struct ClipBlock: View {
                 trimHandle(leading: false).offset(x: width - 10)
             }
         }
-        .frame(width: width, height: 58)
+        .frame(width: width, height: clipTrackHeight)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous)
             .stroke(selected ? Color.white : hovering ? Color.white.opacity(0.7) : Color.primary.opacity(0.15),
@@ -636,7 +632,7 @@ private struct ClipBlock: View {
         UnevenRoundedRectangle(topLeadingRadius: leading ? 7 : 0, bottomLeadingRadius: leading ? 7 : 0,
                                bottomTrailingRadius: leading ? 0 : 7, topTrailingRadius: leading ? 0 : 7)
             .fill(.white)
-            .frame(width: 10, height: 58)
+            .frame(width: 10, height: clipTrackHeight)
             .overlay(Capsule().fill(.black.opacity(0.45)).frame(width: 2, height: 18))
             .contentShape(Rectangle())
             .onHover { inside in
