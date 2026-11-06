@@ -10,7 +10,7 @@
 
 [**下载最新版**](https://github.com/ai-suifeng/takes/releases/latest/download/Takes.zip) · [官网](https://ai-suifeng.github.io/takes/) · [更新记录](https://github.com/ai-suifeng/takes/releases)
 
-免费 · 支持 Apple 芯片和 Intel · macOS 15 及以上
+免费开源（MIT） · 支持 Apple 芯片和 Intel · macOS 15 及以上
 
 </div>
 
@@ -119,3 +119,7 @@ Takes 每天自动检查一次新版本，有更新时弹窗提示，点「立�
 ## 参与开发
 
 从源码构建、发布新版本、项目结构和自测方法，见 [开发说明](docs/DEVELOPMENT.md)。
+
+## 许可证
+
+Takes 以 [MIT 许可证](LICENSE) 开源：可以免费使用、修改和再分发，包括商业用途，只需保留版权和许可声明。
